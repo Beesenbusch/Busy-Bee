@@ -464,6 +464,7 @@ class EntryDialog(tk.Toplevel):
         self.bind("<Return>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self.destroy())
 
+        _center_over(self, parent.winfo_toplevel())
         self.grab_set()
         start_entry.focus_set()
 
@@ -499,6 +500,23 @@ def _make_tree(parent, columns, selectmode="browse") -> ttk.Treeview:
     tree.pack(side="left", fill="both", expand=True)
     scroll.pack(side="right", fill="y")
     return tree
+
+
+def _center_over(dialog: tk.Toplevel, owner: tk.Misc) -> None:
+    """Place dialog in the middle of owner, kept on the owner's screen."""
+    dialog.withdraw()  # avoid a flash at the default position
+    dialog.update_idletasks()
+    width, height = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
+    # geometry() positions the outer frame; subtract the border/title bar size
+    # (taken from the owner) so the dialog's content is what ends up centred.
+    border_x = owner.winfo_rootx() - owner.winfo_x()
+    border_y = owner.winfo_rooty() - owner.winfo_y()
+    x = owner.winfo_rootx() + (owner.winfo_width() - width) // 2 - border_x
+    y = owner.winfo_rooty() + (owner.winfo_height() - height) // 2 - border_y
+    x = max(owner.winfo_vrootx(), x)
+    y = max(owner.winfo_vrooty(), y)
+    dialog.geometry(f"+{x}+{y}")
+    dialog.deiconify()
 
 
 def _safe_filename(name: str) -> str:
