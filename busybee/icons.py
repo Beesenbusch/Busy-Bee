@@ -23,21 +23,31 @@ def _hexagon(cx: float, cy: float, r: float) -> list[tuple[float, float]]:
     return [(cx + r * math.cos(math.radians(60 * i - 30)), cy + r * math.sin(math.radians(60 * i - 30))) for i in range(6)]
 
 
-@lru_cache(maxsize=None)
-def make_icon(state: State, size: int = 64) -> Image.Image:
-    s = size * _SUPERSAMPLE
-    hexagon = _hexagon(s / 2, s / 2, s * 0.49)
-
+def _bee_hexagon(s: int, color: tuple[int, int, int, int]) -> Image.Image:
     mask = Image.new("L", (s, s), 0)
-    ImageDraw.Draw(mask).polygon(hexagon, fill=255)
+    ImageDraw.Draw(mask).polygon(_hexagon(s / 2, s / 2, s * 0.49), fill=255)
 
-    body = Image.new("RGBA", (s, s), GREY if state is State.IDLE else HONEY)
+    body = Image.new("RGBA", (s, s), color)
     stripes = ImageDraw.Draw(body)
     for top in (0.30, 0.56):  # two bee stripes
         stripes.rectangle([0, s * top, s, s * (top + 0.13)], fill=STRIPE)
 
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     img.paste(body, (0, 0), mask)
+    return img
+
+
+@lru_cache(maxsize=None)
+def make_app_icon(size: int = 256) -> Image.Image:
+    """Badge-free honey bee used for the window and taskbar button."""
+    s = size * _SUPERSAMPLE
+    return _bee_hexagon(s, HONEY).resize((size, size), Image.LANCZOS)
+
+
+@lru_cache(maxsize=None)
+def make_icon(state: State, size: int = 64) -> Image.Image:
+    s = size * _SUPERSAMPLE
+    img = _bee_hexagon(s, GREY if state is State.IDLE else HONEY)
 
     if state is not State.IDLE:
         draw = ImageDraw.Draw(img)

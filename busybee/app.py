@@ -19,7 +19,8 @@ from PIL import ImageTk
 
 from . import APP_ID, APP_NAME, autostart, paths
 from .db import Database, Project
-from .icons import make_icon
+from .icons import make_app_icon
+from .taskbar import set_window_app_id
 from .tracker import State, Tracker
 from .tray import TrayIcon
 
@@ -45,8 +46,10 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.root.protocol("WM_SAVE_YOURSELF", self._on_session_end)  # Windows logoff/shutdown
         self.root.report_callback_exception = self._report_error
-        self._window_icon = ImageTk.PhotoImage(make_icon(State.RUNNING, 64))
-        self.root.iconphoto(True, self._window_icon)
+        # Several sizes so Windows can pick a sharp one for title bar, taskbar and Alt+Tab.
+        self._window_icons = [ImageTk.PhotoImage(make_app_icon(n)) for n in (256, 64, 48, 32, 16)]
+        self.root.iconphoto(True, *self._window_icons)
+        self._set_taskbar_identity()
         self.window = None
 
         self.tray = TrayIcon(self)
@@ -176,6 +179,22 @@ class App:
 
     def hide_window(self) -> None:
         self.root.withdraw()
+
+    def _set_taskbar_identity(self) -> None:
+        """Must happen before the window is first shown, or the taskbar keeps a stray Python button.
+
+        Tk only creates the real top-level window when it is first mapped, so map it
+        fully transparent, tag it and withdraw it again.
+        """
+        self.root.attributes("-alpha", 0.0)
+        self.root.deiconify()
+        self.root.update_idletasks()
+        try:
+            set_window_app_id(int(self.root.wm_frame(), 16), APP_ID)
+        except OSError:
+            log.exception("Could not set the taskbar app ID")
+        self.root.withdraw()
+        self.root.attributes("-alpha", 1.0)
 
     def _report_error(self, exc_type, exc, tb) -> None:
         log.error("Unhandled error", exc_info=(exc_type, exc, tb))
