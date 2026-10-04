@@ -1,4 +1,4 @@
-"""Main window: timer controls, projects, time entries / CSV export and settings."""
+"""Main window: timer controls, projects, time entries / CSV export, rules and settings."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from . import APP_NAME, __version__, autostart, paths
 from .db import Entry, Project
 from .export import CSV_FORMATS, DEFAULT_FORMAT, write_csv
+from .rules import ACTION_LABELS, FOCUS_CHECK_DEFAULT_S, FOCUS_HOLD_DEFAULT_S, SWITCH, Rule, clean_rule
 from .timeutil import (
     DATE_FORMAT,
     fmt_duration,
@@ -24,6 +25,7 @@ from .timeutil import (
     previous_month_bounds,
 )
 from .tracker import State
+from .windows import WindowInfo, open_windows
 
 if TYPE_CHECKING:
     from .app import App
@@ -45,11 +47,13 @@ class MainWindow(ttk.Frame):
         self.notebook.pack(fill="both", expand=True, pady=(PAD, 0))
         self.projects_tab = ProjectsTab(self.notebook, self)
         self.entries_tab = EntriesTab(self.notebook, self)
+        self.rules_tab = RulesTab(self.notebook, self)
         self.settings_tab = SettingsTab(self.notebook, self)
         self.notebook.add(self.projects_tab, text="Projects")
         self.notebook.add(self.entries_tab, text="Time entries & export")
+        self.notebook.add(self.rules_tab, text="Rules")
         self.notebook.add(self.settings_tab, text="Settings")
-        self.tabs = {"projects": self.projects_tab, "entries": self.entries_tab, "settings": self.settings_tab}
+        self.tabs = {"projects": self.projects_tab, "entries": self.entries_tab, "rules": self.rules_tab, "settings": self.settings_tab}
 
         self.refresh_all()
         self._tick()
@@ -135,6 +139,7 @@ class MainWindow(ttk.Frame):
         self.refresh_timer()
         self.projects_tab.refresh()
         self.entries_tab.refresh()
+        self.rules_tab.refresh()
 
     def show_tab(self, name: str | None) -> None:
         if name in self.tabs:
@@ -374,6 +379,76 @@ class EntriesTab(ttk.Frame):
         messagebox.showinfo("Export CSV", f"Exported {rows} entries to\n{path}{note}", parent=self)
 
 
+class RulesTab(ttk.Frame):
+    def __init__(self, parent, window: MainWindow):
+        super().__init__(parent, padding=PAD)
+        self.window = window
+        self.app = window.app
+
+        ttk.Label(
+            self,
+            text="When a window that matches a rule keeps focus long enough, Busy Bee carries out the rule's action. "
+            "Windows without a rule change nothing. If several rules match, the most specific one wins. "
+            "Timing and the on/off switch are under Settings.",
+            foreground="gray",
+            wraplength=740,
+            justify="left",
+        ).pack(side="top", anchor="w", pady=(0, PAD))
+
+        buttons = ttk.Frame(self)
+        buttons.pack(side="right", fill="y", padx=(PAD, 0))
+        ttk.Button(buttons, text="Add...", command=self.add).pack(fill="x")
+        ttk.Button(buttons, text="Edit...", command=self.edit).pack(fill="x", pady=4)
+        ttk.Button(buttons, text="Delete", command=self.delete).pack(fill="x")
+
+        self.tree = _make_tree(self, [("title", "Window title contains", 280, "w"), ("exe", "Program", 150, "w"), ("action", "Action", 220, "w")])
+        self.tree.bind("<Double-1>", lambda e: self.edit())
+        self.tree.bind("<Delete>", lambda e: self.delete())
+
+    def refresh(self) -> None:
+        projects = {p.id: p for p in self.app.all_projects()}
+        selected = self.tree.selection()
+        self.tree.delete(*self.tree.get_children())
+        for r in self.app.rules:
+            self.tree.insert("", "end", iid=str(r.id), values=(r.title_contains or "(any)", r.exe or "(any)", _rule_action_text(r, projects)))
+        self.tree.selection_set([iid for iid in selected if self.tree.exists(iid)])
+
+    def _selected(self) -> Rule | None:
+        sel = self.tree.selection()
+        return next((r for r in self.app.rules if str(r.id) == sel[0]), None) if sel else None
+
+    def add(self) -> None:
+        result = RuleDialog.ask(self, self.app, None)
+        if result:
+            self.app.db.add_rule(*result)
+            self.app.rules_changed()
+
+    def edit(self) -> None:
+        rule = self._selected()
+        if not rule:
+            return
+        result = RuleDialog.ask(self, self.app, rule)
+        if result:
+            self.app.db.update_rule(rule.id, *result)
+            self.app.rules_changed()
+
+    def delete(self) -> None:
+        rule = self._selected()
+        if rule and messagebox.askyesno("Delete rule", "Delete the selected rule?", parent=self):
+            self.app.db.delete_rule(rule.id)
+            self.app.rules_changed()
+
+
+def _rule_action_text(rule: Rule, projects: dict[int, Project]) -> str:
+    if rule.action != SWITCH:
+        return ACTION_LABELS[rule.action]
+    project = projects.get(rule.project_id)
+    if project is None or project.archived:
+        name = project.name if project else "?"
+        return f"Switch to {name} (project removed, rule inactive)"
+    return f"Switch to {project.name}"
+
+
 class SettingsTab(ttk.Frame):
     def __init__(self, parent, window: MainWindow):
         super().__init__(parent, padding=PAD * 2)
@@ -393,10 +468,22 @@ class SettingsTab(ttk.Frame):
         ).pack(anchor="w", pady=(PAD, 0))
         ttk.Checkbutton(
             self,
-            text="Show a notification when the timer is started, paused or stopped from the tray",
+            text="Show a notification when the timer is started, paused or stopped from the tray or by a rule",
             variable=self.notify_var,
             command=lambda: db.set_bool("notifications", self.notify_var.get()),
         ).pack(anchor="w", pady=(PAD, 0))
+
+        auto = ttk.LabelFrame(self, text="Automatic switching", padding=PAD)
+        auto.pack(anchor="w", fill="x", pady=(PAD * 2, 0))
+        self.auto_var = tk.BooleanVar(value=self.app.auto_switch)
+        ttk.Checkbutton(
+            auto,
+            text="Switch projects automatically based on the focused window (see the Rules tab)",
+            variable=self.auto_var,
+            command=lambda: self.app.set_auto_switch(self.auto_var.get()),
+        ).pack(anchor="w")
+        self._seconds_row(auto, "Check the focused window every", "rules.check_s", FOCUS_CHECK_DEFAULT_S, 1)
+        self._seconds_row(auto, "Carry out a rule once its window has had focus for", "rules.hold_s", FOCUS_HOLD_DEFAULT_S, 0)
 
         fmt_row = ttk.Frame(self)
         fmt_row.pack(anchor="w", pady=(PAD * 2, 0))
@@ -414,6 +501,25 @@ class SettingsTab(ttk.Frame):
         ttk.Label(data_row, text=str(paths.data_dir()), foreground="gray").pack(side="left", padx=PAD)
 
         ttk.Label(self, text=f"{APP_NAME} {__version__}", foreground="gray").pack(side="bottom", anchor="w")
+
+    def refresh(self) -> None:
+        self.auto_var.set(self.app.auto_switch)
+
+    def _seconds_row(self, parent, label: str, key: str, default: int, minimum: int) -> None:
+        row = ttk.Frame(parent)
+        row.pack(anchor="w", pady=(PAD // 2, 0))
+        ttk.Label(row, text=label).pack(side="left")
+        var = tk.StringVar(value=str(self.app.db.get_int(key, default)))
+        ttk.Spinbox(row, from_=minimum, to=3600, increment=5, textvariable=var, width=6).pack(side="left", padx=4)
+        ttk.Label(row, text="seconds").pack(side="left")
+
+        def save(*_):
+            text = var.get().strip()
+            if text.isdigit() and minimum <= int(text) <= 3600:  # ignore half-typed values
+                self.app.db.set_setting(key, text)
+                self.app.focus_timing_changed()
+
+        var.trace_add("write", save)
 
     def _save_autostart(self) -> None:
         try:
@@ -484,6 +590,103 @@ class EntryDialog(tk.Toplevel):
     @classmethod
     def ask(cls, parent, app: App, entry: Entry | None):
         dialog = cls(parent, app, entry)
+        parent.wait_window(dialog)
+        return dialog.result
+
+
+class RuleDialog(tk.Toplevel):
+    """Modal dialog to add or edit a rule; picking an open window fills in the fields."""
+
+    def __init__(self, parent, app: App, rule: Rule | None):
+        super().__init__(parent)
+        self.result = None
+        self.title("Edit rule" if rule else "Add rule")
+        self.transient(parent.winfo_toplevel())
+        self.resizable(False, False)
+        self.projects = app.projects
+        self.windows: list[WindowInfo] = []
+
+        current = next((p.name for p in self.projects if rule and p.id == rule.project_id), None)
+        default_project = current or app.tracker.project_name or (self.projects[0].name if self.projects else "")
+        self.window_var = tk.StringVar()
+        self.exe_var = tk.StringVar(value=rule.exe if rule else "")
+        self.title_var = tk.StringVar(value=rule.title_contains if rule else "")
+        self.action_var = tk.StringVar(value=ACTION_LABELS[rule.action if rule else SWITCH])
+        self.project_var = tk.StringVar(value=default_project)
+
+        body = ttk.Frame(self, padding=PAD * 2)
+        body.pack(fill="both")
+        ttk.Label(body, text="Pick an open window").grid(row=0, column=0, sticky="w", padx=(0, PAD))
+        picker = ttk.Frame(body)
+        picker.grid(row=0, column=1, sticky="w", pady=2)
+        self.window_combo = ttk.Combobox(picker, textvariable=self.window_var, state="readonly", width=52)
+        self.window_combo.pack(side="left")
+        self.window_combo.bind("<<ComboboxSelected>>", lambda e: self._window_picked())
+        ttk.Button(picker, text="Refresh", command=self._load_windows).pack(side="left", padx=(4, 0))
+
+        ttk.Label(body, text="Program").grid(row=1, column=0, sticky="w")
+        ttk.Entry(body, textvariable=self.exe_var, width=30).grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(body, text="Window title contains").grid(row=2, column=0, sticky="w")
+        title_entry = ttk.Entry(body, textvariable=self.title_var, width=62)
+        title_entry.grid(row=2, column=1, sticky="w", pady=2)
+        ttk.Label(
+            body,
+            text="Leave a field empty to match anything. Titles often change (open file, browser tab), "
+            "so keep only the part that stays the same, e.g. the project folder name.",
+            foreground="gray",
+            wraplength=440,
+            justify="left",
+        ).grid(row=3, column=1, sticky="w", pady=(0, PAD))
+
+        ttk.Label(body, text="Action").grid(row=4, column=0, sticky="w")
+        action_combo = ttk.Combobox(body, textvariable=self.action_var, values=list(ACTION_LABELS.values()), state="readonly", width=28)
+        action_combo.grid(row=4, column=1, sticky="w", pady=2)
+        action_combo.bind("<<ComboboxSelected>>", lambda e: self._update_project_state())
+        ttk.Label(body, text="Project").grid(row=5, column=0, sticky="w")
+        self.project_combo = ttk.Combobox(body, textvariable=self.project_var, values=[p.name for p in self.projects], width=28)
+        self.project_combo.grid(row=5, column=1, sticky="w", pady=2)
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(PAD, 0))
+        ttk.Button(buttons, text="OK", command=self._ok).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="left")
+        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self._load_windows()
+        self._update_project_state()
+        _center_over(self, parent.winfo_toplevel())
+        self.grab_set()
+        title_entry.focus_set()
+
+    def _load_windows(self) -> None:
+        self.windows = open_windows()
+        self.window_combo["values"] = [w.label for w in self.windows]
+        self.window_var.set("")
+
+    def _window_picked(self) -> None:
+        window = self.windows[self.window_combo.current()]
+        self.exe_var.set(window.exe)
+        self.title_var.set(window.title)
+
+    def _action(self) -> str:
+        return next(key for key, label in ACTION_LABELS.items() if label == self.action_var.get())
+
+    def _update_project_state(self) -> None:
+        self.project_combo.configure(state="readonly" if self._action() == SWITCH else "disabled")
+
+    def _ok(self) -> None:
+        project = next((p for p in self.projects if p.name == self.project_var.get()), None)
+        try:
+            self.result = clean_rule(self.exe_var.get(), self.title_var.get(), self._action(), project.id if project else None)
+        except ValueError as e:
+            messagebox.showerror(self.title(), str(e), parent=self)
+            return
+        self.destroy()
+
+    @classmethod
+    def ask(cls, parent, app: App, rule: Rule | None):
+        dialog = cls(parent, app, rule)
         parent.wait_window(dialog)
         return dialog.result
 

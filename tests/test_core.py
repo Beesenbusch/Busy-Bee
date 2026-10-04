@@ -6,6 +6,7 @@ from pathlib import Path
 
 from busybee.db import Database
 from busybee.export import write_csv
+from busybee.rules import PAUSE, STOP, SWITCH, AutoSwitcher, Rule, find_rule
 from busybee.timeutil import fmt_duration, from_db, month_bounds, to_db
 from busybee.tracker import State, Tracker
 
@@ -134,6 +135,59 @@ class TrackerTests(Base):
         self.reopen()
         self.tracker.recover(resume=True)
         self.assertIs(self.tracker.state, State.IDLE)
+
+
+class WindowStub:
+    def __init__(self, title, exe):
+        self.title, self.exe = title, exe
+
+
+class RuleTests(Base):
+    def test_most_specific_rule_wins(self):
+        rules = [
+            Rule(1, "Code.exe", "", SWITCH, self.a),
+            Rule(2, "code.exe", "Busy Bee", SWITCH, self.b),
+            Rule(3, "", "YouTube", PAUSE),
+        ]
+        self.assertEqual(find_rule(rules, WindowStub("main.py - Busy Bee - Visual Studio Code", "Code.exe")).id, 2)
+        self.assertEqual(find_rule(rules, WindowStub("notes.md - Other - Visual Studio Code", "Code.exe")).id, 1)
+        self.assertEqual(find_rule(rules, WindowStub("Cats - youtube - Chrome", "chrome.exe")).id, 3)
+        self.assertIsNone(find_rule(rules, WindowStub("Inbox - Outlook", "OUTLOOK.EXE")))
+
+    def test_switcher_waits_for_hold_and_fires_once(self):
+        rules = [Rule(1, "Code.exe", "", SWITCH, self.a), Rule(2, "chrome.exe", "", STOP)]
+        code, chrome, other = WindowStub("x", "Code.exe"), WindowStub("y", "chrome.exe"), WindowStub("z", "app.exe")
+        switcher = AutoSwitcher(self.clock)
+        self.assertIsNone(switcher.observe(rules, code, 60))
+        self.clock.advance(seconds=45)
+        self.assertIsNone(switcher.observe(rules, code, 60))
+        self.clock.advance(seconds=15)
+        self.assertEqual(switcher.observe(rules, code, 60).id, 1)
+        self.clock.advance(seconds=60)
+        self.assertIsNone(switcher.observe(rules, code, 60))  # already fired for this stretch
+
+        switcher.observe(rules, chrome, 60)
+        self.clock.advance(seconds=30)
+        switcher.observe(rules, other, 60)  # unmatched window cancels the pending rule
+        self.clock.advance(seconds=30)
+        self.assertIsNone(switcher.observe(rules, chrome, 60))
+        self.clock.advance(seconds=30)
+        self.assertIsNone(switcher.observe(rules, None, 60))  # desktop / Busy Bee: no change
+        self.clock.advance(seconds=30)
+        self.assertEqual(switcher.observe(rules, chrome, 60).id, 2)
+
+    def test_rules_crud_and_cascade(self):
+        with self.assertRaises(ValueError):
+            self.db.add_rule(" ", " ", PAUSE, None)
+        with self.assertRaises(ValueError):
+            self.db.add_rule("Code.exe", "", SWITCH, None)
+        rid = self.db.add_rule(" Code.exe ", "  Busy   Bee ", SWITCH, self.a)
+        self.db.add_rule("", "YouTube", PAUSE, self.b)  # project is dropped for non-switch actions
+        self.assertEqual(self.db.list_rules(), [Rule(rid, "Code.exe", "Busy Bee", SWITCH, self.a), Rule(rid + 1, "", "YouTube", PAUSE, None)])
+        self.db.update_rule(rid, "Code.exe", "", SWITCH, self.b)
+        self.assertEqual(self.db.list_rules()[0].project_id, self.b)
+        self.db.delete_project(self.b, keep_entries=False)
+        self.assertEqual([r.action for r in self.db.list_rules()], [PAUSE])
 
 
 class ExportTests(Base):

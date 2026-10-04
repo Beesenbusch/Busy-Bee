@@ -20,9 +20,11 @@ from PIL import ImageTk
 from . import APP_ID, APP_NAME, autostart, paths
 from .db import Database, Project
 from .icons import make_app_icon
+from .rules import FOCUS_CHECK_DEFAULT_S, FOCUS_HOLD_DEFAULT_S, PAUSE, STOP, SWITCH, AutoSwitcher, Rule
 from .taskbar import set_window_app_id
 from .tracker import State, Tracker
 from .tray import TrayIcon
+from .windows import foreground_window
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +38,10 @@ class App:
         self.db = db
         self.tracker = Tracker(db)
         self.projects: list[Project] = []
+        self.rules: list[Rule] = []
+        self.auto_switch = db.get_bool("rules.enabled", True)
+        self.switcher = AutoSwitcher()
+        self._focus_job: str | None = None
         self._queue: queue.Queue[tuple[Callable, tuple]] = queue.Queue()
 
         self.root = tk.Tk()
@@ -68,6 +74,7 @@ class App:
             autostart.refresh()
 
         self.projects = self.db.list_projects()
+        self.rules = self.db.list_rules()
         orphan = self.tracker.recover(resume=self.db.get_bool("resume_on_start", False))
         if orphan:
             log.info("Closed entry %s left open by an unclean exit", orphan.id)
@@ -80,6 +87,7 @@ class App:
         self.root.after(QUEUE_POLL_MS, self._drain_queue)
         self.root.after(HEARTBEAT_MS, self._heartbeat)
         self.root.after(TOOLTIP_MS, self._update_tooltip)
+        self._schedule_focus_check()
         self.root.mainloop()
 
     def quit(self) -> None:
@@ -119,6 +127,59 @@ class App:
             self.tray.refresh()
         self.root.after(TOOLTIP_MS, self._update_tooltip)
 
+    # --- automatic switching ------------------------------------------------------
+
+    def _schedule_focus_check(self) -> None:
+        """(Re)start the focus polling with the current interval; no polling while switched off."""
+        if self._focus_job is not None:
+            self.root.after_cancel(self._focus_job)
+            self._focus_job = None
+        if self.auto_switch:
+            seconds = max(1, self.db.get_int("rules.check_s", FOCUS_CHECK_DEFAULT_S))
+            self._focus_job = self.root.after(seconds * 1000, self._check_focus)
+
+    def _check_focus(self) -> None:
+        self._focus_job = None
+        try:
+            if self.rules:
+                project_ids = {p.id for p in self.projects}
+                usable = [r for r in self.rules if r.action != SWITCH or r.project_id in project_ids]
+                hold = self.db.get_int("rules.hold_s", FOCUS_HOLD_DEFAULT_S)
+                rule = self.switcher.observe(usable, foreground_window(), hold)
+                if rule:
+                    self._apply_rule(rule)
+        except Exception:
+            # Logged, not shown: a dialog every few seconds would be worse than a missed switch.
+            log.exception("Automatic switching failed")
+        self._schedule_focus_check()
+
+    def _apply_rule(self, rule: Rule) -> None:
+        tracker = self.tracker
+        # Notified like a tray action: nothing in the window shows that this happened.
+        if rule.action == SWITCH and not (tracker.state is State.RUNNING and tracker.project_id == rule.project_id):
+            self.start_project(rule.project_id, from_tray=True)
+        elif rule.action == PAUSE and tracker.state is State.RUNNING:
+            self.pause(from_tray=True)
+        elif rule.action == STOP and tracker.state is not State.IDLE:
+            self.stop(from_tray=True)
+
+    def set_auto_switch(self, enabled: bool) -> None:
+        self.auto_switch = enabled
+        self.db.set_bool("rules.enabled", enabled)
+        self.switcher.reset()
+        self._schedule_focus_check()
+        self.tray.refresh()
+        if self.window:
+            self.window.settings_tab.refresh()
+
+    def focus_timing_changed(self) -> None:
+        self._schedule_focus_check()
+
+    def rules_changed(self) -> None:
+        self.rules = self.db.list_rules()
+        if self.window:
+            self.window.rules_tab.refresh()
+
     # --- actions (main thread) ----------------------------------------------------
 
     def start_project(self, project_id: int, from_tray: bool = False) -> None:
@@ -147,6 +208,7 @@ class App:
 
     def projects_changed(self) -> None:
         self.projects = self.db.list_projects()
+        self.rules = self.db.list_rules()  # deleting a project deletes its rules
         self.tray.refresh()
         if self.window:
             self.window.refresh_all()

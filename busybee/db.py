@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .rules import Rule, clean_rule
 from .timeutil import from_db, now, to_db
 
 SCHEMA = """
@@ -26,6 +27,13 @@ CREATE TABLE IF NOT EXISTS entries (
 );
 CREATE INDEX IF NOT EXISTS idx_entries_start ON entries(start_time);
 CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project_id);
+CREATE TABLE IF NOT EXISTS rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    exe             TEXT NOT NULL DEFAULT '',   -- program file name, '' = any
+    title_contains  TEXT NOT NULL DEFAULT '',   -- '' = any title
+    action          TEXT NOT NULL,              -- 'switch', 'pause' or 'stop'
+    project_id      INTEGER REFERENCES projects(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS settings (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
@@ -203,6 +211,28 @@ class Database:
             totals[e.project_id] = totals.get(e.project_id, 0.0) + e.duration_seconds(current)
         return totals
 
+    # --- rules --------------------------------------------------------------------
+
+    def list_rules(self) -> list[Rule]:
+        rows = self._query("SELECT id, exe, title_contains, action, project_id FROM rules ORDER BY id")
+        return [Rule(r["id"], r["exe"], r["title_contains"], r["action"], r["project_id"]) for r in rows]
+
+    def add_rule(self, exe: str, title_contains: str, action: str, project_id: int | None) -> int:
+        cur = self._execute(
+            "INSERT INTO rules (exe, title_contains, action, project_id) VALUES (?, ?, ?, ?)",
+            clean_rule(exe, title_contains, action, project_id),
+        )
+        return cur.lastrowid
+
+    def update_rule(self, rule_id: int, exe: str, title_contains: str, action: str, project_id: int | None) -> None:
+        self._execute(
+            "UPDATE rules SET exe = ?, title_contains = ?, action = ?, project_id = ? WHERE id = ?",
+            (*clean_rule(exe, title_contains, action, project_id), rule_id),
+        )
+
+    def delete_rule(self, rule_id: int) -> None:
+        self._execute("DELETE FROM rules WHERE id = ?", (rule_id,))
+
     # --- settings -----------------------------------------------------------------
 
     def get_setting(self, key: str, default: str | None = None) -> str | None:
@@ -225,6 +255,12 @@ class Database:
 
     def set_bool(self, key: str, value: bool) -> None:
         self.set_setting(key, "1" if value else "0")
+
+    def get_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.get_setting(key, str(default)))
+        except ValueError:
+            return default
 
 
 _ENTRY_SELECT = (

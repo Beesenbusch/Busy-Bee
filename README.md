@@ -3,8 +3,21 @@
 A small Windows tray app for tracking the time you spend on projects.
 
 - **Tray menu:** choose a project under *Start tracking*, then *Pause* / *Resume* / *Stop*. Double-click the bee to open the window.
-- **Window:** a timer bar, **Projects** (add / rename / delete, with totals for this month and all time), **Time entries & export** (filter by date range and project; add, edit or delete entries; *Export CSV...*) and **Settings**.
+- **Window:** a timer bar, **Projects** (add / rename / delete, with totals for this month and all time), **Time entries & export** (filter by date range and project; add, edit or delete entries; *Export CSV...*), **Rules** (see below) and **Settings**.
 - **Icon:** grey bee = idle, bee with ▶ = running, bee with ❚❚ = paused. Hover over it to see the elapsed time.
+
+## Automatic switching
+
+On the **Rules** tab you tell Busy Bee what to do when a certain window has focus: *switch to project X*, *pause tracking* or *stop tracking*. Pick a window from the list of open windows to fill in the rule, then trim it:
+
+- **Program**, e.g. `Code.exe`, and/or **Window title contains**, e.g. `Busy Bee`. An empty field matches anything. Titles change with the open file or browser tab, so keep only the part that stays the same.
+- If several rules match, the most specific one wins (program + title beats only one of them, longer title text beats shorter).
+- Windows without a rule change nothing, and neither do the desktop, the taskbar or Busy Bee itself.
+- A rule fires once its window has kept focus for a while (default 60 s), and only once per visit, so a project you pick by hand stays until you move to a window whose rule says otherwise.
+
+Under *Settings -> Automatic switching* you can turn it off (also in the tray menu) and set how often the focused window is checked (default every 15 s) and how long it must keep focus. A switch happens between *hold time* and *hold time + check interval* after you focus the window. While automatic switching is off, nothing is polled at all.
+
+Windows of programs running as administrator show their title but no program name unless Busy Bee runs as administrator too; match those by title.
 
 ## Setup
 

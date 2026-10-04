@@ -91,8 +91,12 @@ class TrayIcon:
             yield Item("Pause", lambda: app.post(app.pause, True), enabled=tracker.state is State.RUNNING)
         yield Item("Stop", lambda: app.post(app.stop, True), enabled=tracker.state is not State.IDLE)
         yield Menu.SEPARATOR
+        yield Item("Switch projects automatically", self._toggle_auto_switch, checked=lambda item: app.auto_switch)
         yield Item(f"Open {APP_NAME}...", lambda: app.post(app.show_window), default=True)
         yield Item("Quit", lambda: app.post(app.quit))
+
+    def _toggle_auto_switch(self) -> None:
+        self.app.post(lambda: self.app.set_auto_switch(not self.app.auto_switch))
 
     # Factories keep pystray's argument-count detection happy (no default args).
     def _start_action(self, project_id: int):
